@@ -1,1 +1,3 @@
-я как бы за свободу и честность и поэтому поставил лицензию гну апгл в3 поэтому я вам запрещаю пастить и не делится со мной!!!
+Strong HvH cheat for ZCity Gamemode in Garry's Mod
+
+Owned cheats: eschtz.lol, eon.xyz, kurochki.jopa, zovgame.vip, kefir.vip by b3bros
