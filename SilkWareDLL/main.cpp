@@ -1,10 +1,9 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <atomic>
 #include <vector>
-#include <mutex>
 
 #include "resource.h"
 
@@ -28,7 +27,10 @@ static fn_lua_getfield_t     g_getfield = nullptr;
 static fn_lua_toboolean_t    g_toboolean = nullptr;
 static fn_luaL_loadbufferx_t g_loadbufferx = nullptr;
 
+#define LUA_TNIL            0
 #define LUA_TBOOLEAN        1
+#define LUA_TNUMBER         3
+#define LUA_TSTRING         4
 #define LUA_TTABLE          5
 #define LUA_TFUNCTION       6
 #define LUA_GLOBALSINDEX    (-10002)
@@ -444,7 +446,8 @@ static int Hooked_luaL_loadbufferx(void* L, const char* buf, size_t sz, const ch
         }
         if (g_injectedThisState.load() && prev == L) {
             g_callsSinceInject++;
-            if (g_callsSinceInject.load() > CALLS_BEFORE_MARK_CHECK) {
+            int calls = g_callsSinceInject.load();
+            if (calls > CALLS_BEFORE_MARK_CHECK) {
                 DWORD now = GetTickCount();
                 if (now - g_lastCheckTime.load() > MARK_CHECK_INTERVAL_MS) {
                     g_lastCheckTime = now;
@@ -522,7 +525,7 @@ static bool InitLuaFunctions() {
     g_type = (fn_lua_type_t)GetProcAddress(hLua, "lua_type");
     g_getfield = (fn_lua_getfield_t)GetProcAddress(hLua, "lua_getfield");
     g_toboolean = (fn_lua_toboolean_t)GetProcAddress(hLua, "lua_toboolean");
-    return g_loadbufferx && g_pcall && g_gettop && g_settop && g_getfield && g_type && g_toboolean;
+    return g_loadbufferx && g_pcall && g_gettop && g_settop && g_getfield && g_type && g_toboolean && g_tolstring;
 }
 
 static DWORD WINAPI MainThread(LPVOID) {
