@@ -60,7 +60,7 @@ static constexpr UINT_PTR TIMER_RPC = 2;
 static constexpr UINT_PTR TIMER_GAMEWATCH = 3;
 static constexpr UINT     TIMER_MS = 16;
 static constexpr UINT     RPC_TIMER_MS = 15000;
-static constexpr UINT     GAMEWATCH_TIMER_MS = 3000;
+static constexpr UINT     GAMEWATCH_TIMER_MS = 2000;
 
 static constexpr int   NAV_BTN_W = 90;
 static constexpr int   NAV_BTN_H = 28;
@@ -71,10 +71,8 @@ static constexpr int   NAV_BTN_GAP = 8;
 static constexpr int   PRESET_BTN_W = 110;
 static constexpr int   PRESET_BTN_H = 28;
 
-static constexpr int   RPC_PANEL_X = 12;
 static constexpr int   RPC_PANEL_W = 260;
 static constexpr int   RPC_CHECK_H = 24;
-static constexpr int   RPC_CHECK_GAP = 4;
 
 static const wchar_t* GITHUB_URL = L"https://github.com/dragonmirror0/SilkWare-gmod";
 static const char* GITHUB_API_HOST = "api.github.com";
@@ -101,7 +99,6 @@ static std::wstring g_commitsError;
 
 enum class AppState { Menu, Launching, Injecting, Done, Error };
 enum class ViewMode { Main, Commits, Settings };
-enum class RpcStatus { InLoader, InMenus, JoiningServer, PlayingInServer };
 
 static AppState  g_state = AppState::Menu;
 static ViewMode  g_viewMode = ViewMode::Main;
@@ -121,12 +118,7 @@ static bool      g_presetDropdownOpen = false;
 static int       g_presetHoveredIdx = -1;
 
 static bool      g_rpcEnabled = true;
-static bool      g_rpcShowServer = false;
-static RpcStatus g_rpcCurrentStatus = RpcStatus::InLoader;
-static std::wstring g_rpcServerName = L"Unknown Server";
-
 static bool      g_rpcEnabledHovered = false;
-static bool      g_rpcShowServerHovered = false;
 
 static HANDLE    g_discordPipe = INVALID_HANDLE_VALUE;
 static bool      g_discordConnected = false;
@@ -166,8 +158,7 @@ static std::wstring GetLoaderDirectory() {
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wstring path(exePath);
     size_t pos = path.find_last_of(L"\\/");
-    if (pos != std::wstring::npos)
-        return path.substr(0, pos + 1);
+    if (pos != std::wstring::npos) return path.substr(0, pos + 1);
     return L"";
 }
 
@@ -177,30 +168,6 @@ static std::wstring Utf8ToWide(const std::string& s) {
     std::wstring w(len, 0);
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], len);
     return w;
-}
-
-static std::string WideToUtf8(const std::wstring& w) {
-    if (w.empty()) return "";
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(len, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], len, nullptr, nullptr);
-    return s;
-}
-
-static std::string JsonEscape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 16);
-    for (char c : s) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out += c; break;
-        }
-    }
-    return out;
 }
 
 #pragma pack(push, 1)
@@ -250,15 +217,11 @@ static void DiscordConnect() {
     handshake += DISCORD_APP_ID;
     handshake += "\"}";
     if (!DiscordPipeWrite(0, handshake)) {
-        CloseHandle(g_discordPipe);
-        g_discordPipe = INVALID_HANDLE_VALUE;
-        return;
+        CloseHandle(g_discordPipe); g_discordPipe = INVALID_HANDLE_VALUE; return;
     }
     std::string response;
     if (!DiscordPipeRead(response)) {
-        CloseHandle(g_discordPipe);
-        g_discordPipe = INVALID_HANDLE_VALUE;
-        return;
+        CloseHandle(g_discordPipe); g_discordPipe = INVALID_HANDLE_VALUE; return;
     }
     g_discordConnected = true;
     g_rpcStartTime = (ULONGLONG)time(nullptr);
@@ -267,8 +230,7 @@ static void DiscordConnect() {
 static void DiscordDisconnect() {
     std::lock_guard<std::mutex> lock(g_discordMutex);
     if (g_discordPipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(g_discordPipe);
-        g_discordPipe = INVALID_HANDLE_VALUE;
+        CloseHandle(g_discordPipe); g_discordPipe = INVALID_HANDLE_VALUE;
     }
     g_discordConnected = false;
 }
@@ -277,18 +239,15 @@ static void DiscordClearPresence() {
     std::lock_guard<std::mutex> lock(g_discordMutex);
     if (!g_discordConnected || g_discordPipe == INVALID_HANDLE_VALUE) return;
     int nonce = g_discordNonce++;
-    char nonceStr[32];
-    sprintf_s(nonceStr, "%d", nonce);
+    char nonceStr[32]; sprintf_s(nonceStr, "%d", nonce);
+    char pidStr[16]; sprintf_s(pidStr, "%lu", GetCurrentProcessId());
     std::string json = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":";
-    char pidStr[16];
-    sprintf_s(pidStr, "%lu", GetCurrentProcessId());
     json += pidStr;
     json += ",\"activity\":null},\"nonce\":\"";
     json += nonceStr;
     json += "\"}";
     if (!DiscordPipeWrite(1, json)) {
-        CloseHandle(g_discordPipe);
-        g_discordPipe = INVALID_HANDLE_VALUE;
+        CloseHandle(g_discordPipe); g_discordPipe = INVALID_HANDLE_VALUE;
         g_discordConnected = false;
     }
     else {
@@ -305,59 +264,37 @@ static void DiscordUpdatePresence() {
     std::lock_guard<std::mutex> lock(g_discordMutex);
     if (!g_discordConnected || g_discordPipe == INVALID_HANDLE_VALUE) return;
 
-    std::string state, details, largeImageKey, largeImageText;
-    largeImageKey = "silkware_logo";
-    largeImageText = "SilkWare";
+    std::string state, details;
 
-    switch (g_rpcCurrentStatus) {
-    case RpcStatus::InLoader:
+    if (g_gameInjected.load()) {
+        details = "In Game";
+        state = "Playing Garry's Mod";
+    }
+    else {
         details = "In Loader";
         state = "Selecting options...";
-        break;
-    case RpcStatus::InMenus:
-        details = "In Menus";
-        state = "Browsing menus";
-        break;
-    case RpcStatus::JoiningServer:
-        details = "Joining Server";
-        if (g_rpcShowServer)
-            state = JsonEscape(WideToUtf8(g_rpcServerName));
-        else
-            state = "Connecting...";
-        break;
-    case RpcStatus::PlayingInServer:
-        details = "Playing in Server";
-        if (g_rpcShowServer)
-            state = JsonEscape(WideToUtf8(g_rpcServerName));
-        else
-            state = "In game";
-        break;
     }
 
     int nonce = g_discordNonce++;
-    char nonceStr[32];
-    sprintf_s(nonceStr, "%d", nonce);
+    char nonceStr[32]; sprintf_s(nonceStr, "%d", nonce);
+    char pidStr[16]; sprintf_s(pidStr, "%lu", GetCurrentProcessId());
+    char tsStr[32]; sprintf_s(tsStr, "%llu", g_rpcStartTime);
 
     std::string json = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":";
-    char pidStr[16];
-    sprintf_s(pidStr, "%lu", GetCurrentProcessId());
     json += pidStr;
     json += ",\"activity\":{";
     json += "\"details\":\"" + details + "\",";
     json += "\"state\":\"" + state + "\",";
     json += "\"timestamps\":{\"start\":";
-    char tsStr[32];
-    sprintf_s(tsStr, "%llu", g_rpcStartTime);
     json += tsStr;
     json += "},";
-    json += "\"assets\":{\"large_image\":\"" + largeImageKey + "\",\"large_text\":\"" + largeImageText + "\"}";
+    json += "\"assets\":{\"large_image\":\"silkware_logo\",\"large_text\":\"SilkWare\"}";
     json += "}},\"nonce\":\"";
     json += nonceStr;
     json += "\"}";
 
     if (!DiscordPipeWrite(1, json)) {
-        CloseHandle(g_discordPipe);
-        g_discordPipe = INVALID_HANDLE_VALUE;
+        CloseHandle(g_discordPipe); g_discordPipe = INVALID_HANDLE_VALUE;
         g_discordConnected = false;
     }
     else {
@@ -372,10 +309,7 @@ static void DiscordUpdatePresence() {
 
 static void RpcTick() {
     if (!g_rpcEnabled) {
-        if (g_discordConnected) {
-            DiscordClearPresence();
-            DiscordDisconnect();
-        }
+        if (g_discordConnected) { DiscordClearPresence(); DiscordDisconnect(); }
         return;
     }
     if (!g_discordConnected) DiscordConnect();
@@ -407,8 +341,7 @@ static void TrayShowContextMenu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW, L"Show");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit");
-    POINT pt;
-    GetCursorPos(&pt);
+    POINT pt; GetCursorPos(&pt);
     SetForegroundWindow(hwnd);
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(hMenu);
@@ -418,8 +351,7 @@ static DWORD FindProcessId(const wchar_t* processName) {
     DWORD pid = 0;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
-    PROCESSENTRY32W pe;
-    pe.dwSize = sizeof(pe);
+    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
     if (Process32FirstW(snap, &pe)) {
         do {
             if (_wcsicmp(pe.szExeFile, processName) == 0) { pid = pe.th32ProcessID; break; }
@@ -448,8 +380,7 @@ static bool HasModule(DWORD pid, const wchar_t* moduleName) {
             if (err == ERROR_BAD_LENGTH || err == ERROR_PARTIAL_COPY || err == ERROR_ACCESS_DENIED) { Sleep(300); continue; }
             return false;
         }
-        MODULEENTRY32W me;
-        me.dwSize = sizeof(me);
+        MODULEENTRY32W me; me.dwSize = sizeof(me);
         bool found = false;
         if (Module32FirstW(snap, &me)) {
             do {
@@ -534,7 +465,6 @@ static void ResetToMenu() {
     g_gamePid = 0;
     g_gameInjected = false;
     g_gameWasRunning = false;
-    g_rpcCurrentStatus = RpcStatus::InLoader;
     KillTimer(g_hwnd, TIMER_SPINNER);
     KillTimer(g_hwnd, TIMER_GAMEWATCH);
     RpcTick();
@@ -545,49 +475,24 @@ static void CheckGameState() {
     DWORD pid = g_gamePid.load();
     if (pid == 0) {
         pid = FindProcessId(L"gmod.exe");
-        if (pid != 0) {
-            g_gamePid = pid;
-        }
+        if (pid != 0) g_gamePid = pid;
     }
 
     if (pid == 0) {
-        if (g_gameWasRunning.load()) {
-            ResetToMenu();
-        }
+        if (g_gameWasRunning.load()) ResetToMenu();
         return;
     }
 
     if (!IsProcessRunning(pid)) {
         DWORD freshPid = FindProcessId(L"gmod.exe");
         if (freshPid == 0) {
-            if (g_gameWasRunning.load()) {
-                ResetToMenu();
-            }
+            if (g_gameWasRunning.load()) ResetToMenu();
             return;
         }
         g_gamePid = freshPid;
-        pid = freshPid;
     }
 
     g_gameWasRunning = true;
-
-    if (!g_gameInjected.load()) return;
-
-    bool hasEngine = HasModule(pid, L"engine.dll");
-    bool hasClient = HasModule(pid, L"client.dll");
-
-    if (!hasEngine || !hasClient) {
-        g_rpcCurrentStatus = RpcStatus::InMenus;
-        return;
-    }
-
-    bool hasServerDll = HasModule(pid, L"server.dll");
-    if (hasServerDll) {
-        g_rpcCurrentStatus = RpcStatus::PlayingInServer;
-    }
-    else {
-        g_rpcCurrentStatus = RpcStatus::InMenus;
-    }
 }
 
 static DWORD WINAPI InjectionThread(LPVOID) {
@@ -600,7 +505,6 @@ static DWORD WINAPI InjectionThread(LPVOID) {
     bool wasAlreadyRunning = (pid != 0);
     if (!pid) {
         SetStatus(L"Launching Garry's Mod...", AppState::Launching);
-        g_rpcCurrentStatus = RpcStatus::InLoader;
         RpcTick();
         ShellExecuteW(nullptr, L"open", L"steam://rungameid/4000", nullptr, nullptr, SW_SHOWNORMAL);
         SetStatus(L"Waiting for gmod.exe...", AppState::Launching);
@@ -619,7 +523,6 @@ static DWORD WINAPI InjectionThread(LPVOID) {
 
     g_gamePid = pid;
     g_gameWasRunning = true;
-    g_rpcCurrentStatus = RpcStatus::InMenus;
     RpcTick();
 
     if (!WaitForGameReady(pid)) {
@@ -649,11 +552,9 @@ static DWORD WINAPI InjectionThread(LPVOID) {
 
     g_gameInjected = true;
     SetStatus(L"SilkWare injected successfully!", AppState::Done);
-    g_rpcCurrentStatus = RpcStatus::InMenus;
     RpcTick();
 
     SetTimer(g_hwnd, TIMER_GAMEWATCH, GAMEWATCH_TIMER_MS, nullptr);
-
     return 0;
 }
 
@@ -661,34 +562,47 @@ static D2D1_RECT_F GetCloseButtonRect(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
     return D2D1::RectF((float)(rc.right - CLOSE_BTN_W), 0.0f, (float)rc.right, (float)CLOSE_BTN_H);
 }
-
 static D2D1_RECT_F GetLaunchButtonRect(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
     float cx = (rc.right - LAUNCH_BTN_W) / 2.0f;
     float cy = (rc.bottom - LAUNCH_BTN_H) / 2.0f;
     return D2D1::RectF(cx, cy, cx + LAUNCH_BTN_W, cy + LAUNCH_BTN_H);
 }
-
 static D2D1_RECT_F GetGitHubButtonRect() {
     return D2D1::RectF((float)NAV_BTN_X_START, (float)NAV_BTN_Y, (float)(NAV_BTN_X_START + NAV_BTN_W), (float)(NAV_BTN_Y + NAV_BTN_H));
 }
-
 static D2D1_RECT_F GetCommitsButtonRect() {
     float x = (float)(NAV_BTN_X_START + NAV_BTN_W + NAV_BTN_GAP);
     return D2D1::RectF(x, (float)NAV_BTN_Y, x + NAV_BTN_W, (float)(NAV_BTN_Y + NAV_BTN_H));
 }
-
 static D2D1_RECT_F GetSettingsButtonRect() {
     float x = (float)(NAV_BTN_X_START + (NAV_BTN_W + NAV_BTN_GAP) * 2);
     return D2D1::RectF(x, (float)NAV_BTN_Y, x + NAV_BTN_W, (float)(NAV_BTN_Y + NAV_BTN_H));
 }
-
 static D2D1_RECT_F GetBackButtonRect() {
     return D2D1::RectF((float)NAV_BTN_X_START, (float)NAV_BTN_Y, (float)(NAV_BTN_X_START + NAV_BTN_W), (float)(NAV_BTN_Y + NAV_BTN_H));
 }
-
 static bool HitTest(D2D1_RECT_F r, int mx, int my) {
     return mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom;
+}
+static D2D1_RECT_F GetRpcEnabledCheckRect() {
+    float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 20);
+    float rpcSectionY = contentTop + 80;
+    float chkY = rpcSectionY + 28;
+    return D2D1::RectF(24.0f - 4, chkY, 24.0f + RPC_PANEL_W, chkY + RPC_CHECK_H);
+}
+static float GetPresetDropdownY() {
+    float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 20);
+    return contentTop + 28;
+}
+static D2D1_RECT_F GetPresetButtonRect() {
+    float presetY = GetPresetDropdownY();
+    return D2D1::RectF(24.0f, presetY, 24.0f + PRESET_BTN_W, presetY + PRESET_BTN_H);
+}
+static D2D1_RECT_F GetPresetDropdownItemRect(int idx) {
+    float presetY = GetPresetDropdownY();
+    float itemY = presetY + PRESET_BTN_H + idx * PRESET_BTN_H;
+    return D2D1::RectF(24.0f, itemY, 24.0f + PRESET_BTN_W, itemY + PRESET_BTN_H);
 }
 
 static void DisableRoundedCorners(HWND hwnd) {
@@ -725,39 +639,19 @@ static void CreateD2DResources(HWND hwnd) {
 }
 
 static void RenderCheckbox(float x, float y, float w, float h, const wchar_t* label, bool checked, bool hovered) {
-    ID2D1SolidColorBrush* brBox = nullptr;
-    ID2D1SolidColorBrush* brCheck = nullptr;
-    ID2D1SolidColorBrush* brText = nullptr;
-    ID2D1SolidColorBrush* brHov = nullptr;
+    ID2D1SolidColorBrush* brBox = nullptr, * brCheck = nullptr, * brText = nullptr, * brHov = nullptr;
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.30f, 0.30f), &brBox);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.12f, 0.12f), &brCheck);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.86f, 0.86f, 0.86f), &brText);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.18f, 0.18f), &brHov);
-
-    float boxSize = 16.0f;
-    float boxX = x;
-    float boxY = y + (h - boxSize) / 2.0f;
-
-    if (hovered) {
-        D2D1_RECT_F bgRc = D2D1::RectF(x - 4, y, x + w, y + h);
-        g_renderTarget->FillRectangle(bgRc, brHov);
-    }
-
+    float boxSize = 16.0f, boxX = x, boxY = y + (h - boxSize) / 2.0f;
+    if (hovered) { D2D1_RECT_F bgRc = D2D1::RectF(x - 4, y, x + w, y + h); g_renderTarget->FillRectangle(bgRc, brHov); }
     D2D1_RECT_F boxRc = D2D1::RectF(boxX, boxY, boxX + boxSize, boxY + boxSize);
     g_renderTarget->DrawRectangle(boxRc, brBox, 1.5f);
-
-    if (checked) {
-        D2D1_RECT_F innerRc = D2D1::RectF(boxX + 3, boxY + 3, boxX + boxSize - 3, boxY + boxSize - 3);
-        g_renderTarget->FillRectangle(innerRc, brCheck);
-    }
-
+    if (checked) { D2D1_RECT_F innerRc = D2D1::RectF(boxX + 3, boxY + 3, boxX + boxSize - 3, boxY + boxSize - 3); g_renderTarget->FillRectangle(innerRc, brCheck); }
     D2D1_RECT_F textRc = D2D1::RectF(boxX + boxSize + 8, y, x + w, y + h);
     g_renderTarget->DrawText(label, (UINT32)wcslen(label), g_fmtSettingsSmall, textRc, brText);
-
-    if (brBox) brBox->Release();
-    if (brCheck) brCheck->Release();
-    if (brText) brText->Release();
-    if (brHov) brHov->Release();
+    if (brBox) brBox->Release(); if (brCheck) brCheck->Release(); if (brText) brText->Release(); if (brHov) brHov->Release();
 }
 
 static void RenderCommitsView(float w, float h) {
@@ -769,11 +663,9 @@ static void RenderCommitsView(float w, float h) {
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.12f, 0.12f), &brSeparator);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.12f, 0.12f), &brSha);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.15f, 0.15f), &brError);
-
     D2D1_RECT_F backRc = GetBackButtonRect();
     g_renderTarget->FillRectangle(backRc, g_backHovered ? brBtnHov : brBtnBg);
     g_renderTarget->DrawText(L"\u2190 Back", 6, g_fmtNavBtn, backRc, brText);
-
     float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 16);
     float contentLeft = 24.0f, contentRight = w - 24.0f;
     if (g_commitsLoading) {
@@ -791,10 +683,7 @@ static void RenderCommitsView(float w, float h) {
             float itemTop = y + i * itemHeight;
             float itemBottom = itemTop + itemHeight;
             if (itemBottom < contentTop || itemTop > h) continue;
-            if (i > 0) {
-                D2D1_RECT_F sepRc = D2D1::RectF(contentLeft, itemTop, contentRight, itemTop + 1);
-                g_renderTarget->FillRectangle(sepRc, brSeparator);
-            }
+            if (i > 0) { D2D1_RECT_F sepRc = D2D1::RectF(contentLeft, itemTop, contentRight, itemTop + 1); g_renderTarget->FillRectangle(sepRc, brSeparator); }
             D2D1_RECT_F shaRc = D2D1::RectF(contentLeft, itemTop + 4, contentLeft + 80, itemTop + 24);
             g_renderTarget->DrawText(g_commits[i].sha.c_str(), (UINT32)g_commits[i].sha.size(), g_fmtCommitMeta, shaRc, brSha);
             D2D1_RECT_F msgRc = D2D1::RectF(contentLeft + 88, itemTop + 4, contentRight, itemTop + 28);
@@ -806,15 +695,9 @@ static void RenderCommitsView(float w, float h) {
             g_renderTarget->DrawText(meta.c_str(), (UINT32)meta.size(), g_fmtCommitMeta, metaRc, brDim);
         }
     }
-
     if (brText) brText->Release(); if (brDim) brDim->Release(); if (brBtnBg) brBtnBg->Release();
     if (brBtnHov) brBtnHov->Release(); if (brSeparator) brSeparator->Release();
     if (brSha) brSha->Release(); if (brError) brError->Release();
-}
-
-static float GetPresetDropdownY() {
-    float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 20);
-    return contentTop + 28;
 }
 
 static void RenderSettingsContent(float w, float h) {
@@ -824,17 +707,13 @@ static void RenderSettingsContent(float w, float h) {
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.15f, 0.15f), &brBtnBg);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.22f, 0.22f), &brBtnHov);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.12f, 0.12f), &brSec);
-
     D2D1_RECT_F backRc = GetBackButtonRect();
     g_renderTarget->FillRectangle(backRc, g_backHovered ? brBtnHov : brBtnBg);
     g_renderTarget->DrawText(L"\u2190 Back", 6, g_fmtNavBtn, backRc, brText);
-
     float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 20);
     float leftCol = 24.0f;
-
     D2D1_RECT_F secRc1 = D2D1::RectF(leftCol, contentTop, leftCol + 200, contentTop + 22);
     g_renderTarget->DrawText(L"Window Scale", 12, g_fmtSettingsLabel, secRc1, brSec);
-
     float presetY = contentTop + 28;
     D2D1_RECT_F presetBtnRc = D2D1::RectF(leftCol, presetY, leftCol + PRESET_BTN_W, presetY + PRESET_BTN_H);
     g_renderTarget->FillRectangle(presetBtnRc, brBtnBg);
@@ -842,64 +721,35 @@ static void RenderSettingsContent(float w, float h) {
     std::wstring presetLabel = g_presets[g_currentPreset].label;
     presetLabel += L" \u25BC";
     g_renderTarget->DrawText(presetLabel.c_str(), (UINT32)presetLabel.size(), g_fmtSettingsSmall, presetBtnRc, brText);
-
     float rpcSectionY = contentTop + 80;
     D2D1_RECT_F secRc2 = D2D1::RectF(leftCol, rpcSectionY, leftCol + 200, rpcSectionY + 22);
     g_renderTarget->DrawText(L"Discord Rich Presence", 21, g_fmtSettingsLabel, secRc2, brSec);
-
     float chkY = rpcSectionY + 28;
     RenderCheckbox(leftCol, chkY, (float)RPC_PANEL_W, (float)RPC_CHECK_H, L"Enable Discord RPC", g_rpcEnabled, g_rpcEnabledHovered);
-
-    float chkY2 = chkY + RPC_CHECK_H + RPC_CHECK_GAP;
-    RenderCheckbox(leftCol, chkY2, (float)RPC_PANEL_W, (float)RPC_CHECK_H, L"Show Server Name", g_rpcShowServer, g_rpcShowServerHovered);
-
-    float statusSectionY = chkY2 + RPC_CHECK_H + 16;
-    D2D1_RECT_F secRc3 = D2D1::RectF(leftCol, statusSectionY, leftCol + 200, statusSectionY + 22);
-    g_renderTarget->DrawText(L"RPC Status Preview", 18, g_fmtSettingsLabel, secRc3, brSec);
-
-    float statusY = statusSectionY + 26;
-    const wchar_t* statusNames[] = { L"\u25CF In Loader", L"\u25CF In Menus", L"\u25CF Joining Server", L"\u25CF Playing in Server" };
-    for (int i = 0; i < 4; i++) {
-        D2D1_RECT_F sRc = D2D1::RectF(leftCol + 8, statusY + i * 22.0f, leftCol + 280, statusY + (i + 1) * 22.0f);
-        ID2D1SolidColorBrush* sColor = ((int)g_rpcCurrentStatus == i) ? brSec : brDim;
-        g_renderTarget->DrawText(statusNames[i], (UINT32)wcslen(statusNames[i]), g_fmtSettingsSmall, sRc, sColor);
-    }
-
     if (brText) brText->Release(); if (brDim) brDim->Release(); if (brBtnBg) brBtnBg->Release();
     if (brBtnHov) brBtnHov->Release(); if (brSec) brSec->Release();
 }
 
 static void RenderSettingsDropdown() {
     if (!g_presetDropdownOpen) return;
-
     ID2D1SolidColorBrush* brText = nullptr, * brDim = nullptr, * brDropBg = nullptr, * brDropHov = nullptr, * brShadow = nullptr;
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.86f, 0.86f, 0.86f), &brText);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.50f, 0.50f, 0.50f), &brDim);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f), &brDropBg);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.25f, 0.25f, 0.25f), &brDropHov);
     g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.5f), &brShadow);
-
-    float leftCol = 24.0f;
-    float presetY = GetPresetDropdownY();
-
-    D2D1_RECT_F shadowRc = D2D1::RectF(leftCol + 2, presetY + PRESET_BTN_H + 2,
-        leftCol + PRESET_BTN_W + 4, presetY + PRESET_BTN_H + g_presetCount * PRESET_BTN_H + 4);
+    float leftCol = 24.0f, presetY = GetPresetDropdownY();
+    D2D1_RECT_F shadowRc = D2D1::RectF(leftCol + 2, presetY + PRESET_BTN_H + 2, leftCol + PRESET_BTN_W + 4, presetY + PRESET_BTN_H + g_presetCount * PRESET_BTN_H + 4);
     g_renderTarget->FillRectangle(shadowRc, brShadow);
-
-    D2D1_RECT_F fullDropRc = D2D1::RectF(leftCol, presetY + PRESET_BTN_H,
-        leftCol + PRESET_BTN_W, presetY + PRESET_BTN_H + g_presetCount * PRESET_BTN_H);
+    D2D1_RECT_F fullDropRc = D2D1::RectF(leftCol, presetY + PRESET_BTN_H, leftCol + PRESET_BTN_W, presetY + PRESET_BTN_H + g_presetCount * PRESET_BTN_H);
     g_renderTarget->FillRectangle(fullDropRc, brDropBg);
-
     for (int i = 0; i < g_presetCount; i++) {
         float itemY = presetY + PRESET_BTN_H + i * PRESET_BTN_H;
         D2D1_RECT_F itemRc = D2D1::RectF(leftCol, itemY, leftCol + PRESET_BTN_W, itemY + PRESET_BTN_H);
-        if (i == g_presetHoveredIdx)
-            g_renderTarget->FillRectangle(itemRc, brDropHov);
+        if (i == g_presetHoveredIdx) g_renderTarget->FillRectangle(itemRc, brDropHov);
         g_renderTarget->DrawText(g_presets[i].label, (UINT32)wcslen(g_presets[i].label), g_fmtSettingsSmall, itemRc, brText);
     }
-
     g_renderTarget->DrawRectangle(fullDropRc, brDim, 1.0f);
-
     if (brText) brText->Release(); if (brDim) brDim->Release(); if (brDropBg) brDropBg->Release();
     if (brDropHov) brDropHov->Release(); if (brShadow) brShadow->Release();
 }
@@ -992,11 +842,7 @@ static void Render(HWND hwnd) {
             }
         }
     }
-
-    if (g_viewMode == ViewMode::Settings) {
-        RenderSettingsDropdown();
-    }
-
+    if (g_viewMode == ViewMode::Settings) RenderSettingsDropdown();
     if (brText) brText->Release(); if (brRed) brRed->Release(); if (brRedHov) brRedHov->Release();
     if (brRedPress) brRedPress->Release(); if (brCloseHov) brCloseHov->Release();
     if (brSpinner) brSpinner->Release(); if (brTitleText) brTitleText->Release();
@@ -1006,32 +852,6 @@ static void Render(HWND hwnd) {
     if (hr == D2DERR_RECREATE_TARGET) DiscardD2DResources();
 }
 
-static D2D1_RECT_F GetRpcEnabledCheckRect() {
-    float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 20);
-    float rpcSectionY = contentTop + 80;
-    float chkY = rpcSectionY + 28;
-    return D2D1::RectF(24.0f - 4, chkY, 24.0f + RPC_PANEL_W, chkY + RPC_CHECK_H);
-}
-
-static D2D1_RECT_F GetRpcShowServerCheckRect() {
-    float contentTop = (float)(NAV_BTN_Y + NAV_BTN_H + 20);
-    float rpcSectionY = contentTop + 80;
-    float chkY = rpcSectionY + 28;
-    float chkY2 = chkY + RPC_CHECK_H + RPC_CHECK_GAP;
-    return D2D1::RectF(24.0f - 4, chkY2, 24.0f + RPC_PANEL_W, chkY2 + RPC_CHECK_H);
-}
-
-static D2D1_RECT_F GetPresetButtonRect() {
-    float presetY = GetPresetDropdownY();
-    return D2D1::RectF(24.0f, presetY, 24.0f + PRESET_BTN_W, presetY + PRESET_BTN_H);
-}
-
-static D2D1_RECT_F GetPresetDropdownItemRect(int idx) {
-    float presetY = GetPresetDropdownY();
-    float itemY = presetY + PRESET_BTN_H + idx * PRESET_BTN_H;
-    return D2D1::RectF(24.0f, itemY, 24.0f + PRESET_BTN_W, itemY + PRESET_BTN_H);
-}
-
 static std::string ExtractJsonString(const std::string& json, size_t startPos, const std::string& key) {
     std::string searchKey = "\"" + key + "\"";
     size_t pos = json.find(searchKey, startPos);
@@ -1039,8 +859,7 @@ static std::string ExtractJsonString(const std::string& json, size_t startPos, c
     pos = json.find(':', pos + searchKey.size());
     if (pos == std::string::npos) return "";
     pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r'))
-        pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) pos++;
     if (pos >= json.size() || json[pos] != '"') return "";
     pos++;
     std::string result;
@@ -1056,9 +875,7 @@ static std::string ExtractJsonString(const std::string& json, size_t startPos, c
             default: result += json[pos]; break;
             }
         }
-        else {
-            result += json[pos];
-        }
+        else { result += json[pos]; }
         pos++;
     }
     return result;
@@ -1075,8 +892,7 @@ static std::vector<CommitInfo> ParseCommitsJson(const std::string& json) {
         std::string sha = ExtractJsonString(json, shaPos, "sha");
         size_t messagePos = json.find("\"message\"", commitObjPos);
         std::string message;
-        if (messagePos != std::string::npos)
-            message = ExtractJsonString(json, messagePos, "message");
+        if (messagePos != std::string::npos) message = ExtractJsonString(json, messagePos, "message");
         size_t authorPos = json.find("\"author\"", commitObjPos);
         std::string authorName, date;
         if (authorPos != std::string::npos) {
@@ -1110,15 +926,11 @@ static std::string HttpGet(const char* host, const char* path) {
         InternetCloseHandle(hRequest); InternetCloseHandle(hConnect); InternetCloseHandle(hInternet); return "";
     }
     std::string response;
-    char buffer[4096];
-    DWORD bytesRead = 0;
+    char buffer[4096]; DWORD bytesRead = 0;
     while (InternetReadFile(hRequest, buffer, sizeof(buffer) - 1, &bytesRead) && bytesRead > 0) {
-        buffer[bytesRead] = 0;
-        response.append(buffer, bytesRead);
+        buffer[bytesRead] = 0; response.append(buffer, bytesRead);
     }
-    InternetCloseHandle(hRequest);
-    InternetCloseHandle(hConnect);
-    InternetCloseHandle(hInternet);
+    InternetCloseHandle(hRequest); InternetCloseHandle(hConnect); InternetCloseHandle(hInternet);
     return response;
 }
 
@@ -1126,15 +938,9 @@ static DWORD WINAPI LoadCommitsThread(LPVOID) {
     g_commitsLoading = true;
     g_commitsError.clear();
     std::string json = HttpGet(GITHUB_API_HOST, GITHUB_API_PATH);
-    if (json.empty()) {
-        g_commitsError = L"Failed to fetch commits";
-        g_commitsLoading = false;
-        InvalidateRect(g_hwnd, nullptr, FALSE);
-        return 1;
-    }
+    if (json.empty()) { g_commitsError = L"Failed to fetch commits"; g_commitsLoading = false; InvalidateRect(g_hwnd, nullptr, FALSE); return 1; }
     g_commits = ParseCommitsJson(json);
-    if (g_commits.empty())
-        g_commitsError = L"No commits found";
+    if (g_commits.empty()) g_commitsError = L"No commits found";
     g_commitsLoaded = true;
     g_commitsLoading = false;
     InvalidateRect(g_hwnd, nullptr, FALSE);
@@ -1147,7 +953,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DisableRoundedCorners(hwnd);
         TrayCreate(hwnd);
         SetTimer(hwnd, TIMER_RPC, RPC_TIMER_MS, nullptr);
-        g_rpcCurrentStatus = RpcStatus::InLoader;
         RpcTick();
         return 0;
     case WM_PAINT: { PAINTSTRUCT ps; BeginPaint(hwnd, &ps); Render(hwnd); EndPaint(hwnd, &ps); return 0; }
@@ -1171,23 +976,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_TRAYICON:
-        if (lp == WM_LBUTTONDBLCLK) {
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
-        }
-        else if (lp == WM_RBUTTONUP) {
-            TrayShowContextMenu(hwnd);
-        }
+        if (lp == WM_LBUTTONDBLCLK) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
+        else if (lp == WM_RBUTTONUP) { TrayShowContextMenu(hwnd); }
         return 0;
     case WM_COMMAND:
-        if (LOWORD(wp) == IDM_TRAY_SHOW) {
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
-        }
-        else if (LOWORD(wp) == IDM_TRAY_EXIT) {
-            g_reallyQuit = true;
-            DestroyWindow(hwnd);
-        }
+        if (LOWORD(wp) == IDM_TRAY_SHOW) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
+        else if (LOWORD(wp) == IDM_TRAY_EXIT) { g_reallyQuit = true; DestroyWindow(hwnd); }
         return 0;
     case WM_MOUSEWHEEL:
         if (g_viewMode == ViewMode::Commits) {
@@ -1224,16 +1018,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (newBackHov != g_backHovered) { g_backHovered = newBackHov; repaint = true; }
             bool newRpcEn = HitTest(GetRpcEnabledCheckRect(), mx, my);
             if (newRpcEn != g_rpcEnabledHovered) { g_rpcEnabledHovered = newRpcEn; repaint = true; }
-            bool newRpcSs = HitTest(GetRpcShowServerCheckRect(), mx, my);
-            if (newRpcSs != g_rpcShowServerHovered) { g_rpcShowServerHovered = newRpcSs; repaint = true; }
             if (g_presetDropdownOpen) {
-                int oldIdx = g_presetHoveredIdx;
-                g_presetHoveredIdx = -1;
+                int oldIdx = g_presetHoveredIdx; g_presetHoveredIdx = -1;
                 for (int i = 0; i < g_presetCount; i++) {
-                    if (HitTest(GetPresetDropdownItemRect(i), mx, my)) {
-                        g_presetHoveredIdx = i;
-                        break;
-                    }
+                    if (HitTest(GetPresetDropdownItemRect(i), mx, my)) { g_presetHoveredIdx = i; break; }
                 }
                 if (g_presetHoveredIdx != oldIdx) repaint = true;
             }
@@ -1259,18 +1047,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE: {
-        bool repaint = g_closeHovered || g_launchHovered || g_githubHovered || g_commitsHovered || g_backHovered || g_settingsHovered || g_rpcEnabledHovered || g_rpcShowServerHovered;
-        g_closeHovered = g_launchHovered = g_githubHovered = g_commitsHovered = g_backHovered = g_settingsHovered = g_rpcEnabledHovered = g_rpcShowServerHovered = false;
+        bool repaint = g_closeHovered || g_launchHovered || g_githubHovered || g_commitsHovered || g_backHovered || g_settingsHovered || g_rpcEnabledHovered;
+        g_closeHovered = g_launchHovered = g_githubHovered = g_commitsHovered = g_backHovered = g_settingsHovered = g_rpcEnabledHovered = false;
         g_presetHoveredIdx = -1;
         if (repaint) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_LBUTTONDOWN: {
         int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
-        if (HitTest(GetCloseButtonRect(hwnd), mx, my)) {
-            ShowWindow(hwnd, SW_HIDE);
-            return 0;
-        }
+        if (HitTest(GetCloseButtonRect(hwnd), mx, my)) { ShowWindow(hwnd, SW_HIDE); return 0; }
         if (g_viewMode == ViewMode::Commits) {
             if (HitTest(GetBackButtonRect(), mx, my)) {
                 g_viewMode = ViewMode::Main; g_commitsScroll = 0; g_backHovered = false;
@@ -1282,16 +1067,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 bool clickedItem = false;
                 for (int i = 0; i < g_presetCount; i++) {
                     if (HitTest(GetPresetDropdownItemRect(i), mx, my)) {
-                        g_presetDropdownOpen = false;
-                        ApplyPreset(i);
-                        clickedItem = true;
-                        break;
+                        g_presetDropdownOpen = false; ApplyPreset(i); clickedItem = true; break;
                     }
                 }
-                if (!clickedItem) {
-                    g_presetDropdownOpen = false;
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+                if (!clickedItem) { g_presetDropdownOpen = false; InvalidateRect(hwnd, nullptr, FALSE); }
                 return 0;
             }
             if (HitTest(GetBackButtonRect(), mx, my)) {
@@ -1299,24 +1078,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateRect(hwnd, nullptr, FALSE); return 0;
             }
             if (HitTest(GetPresetButtonRect(), mx, my)) {
-                g_presetDropdownOpen = !g_presetDropdownOpen;
-                InvalidateRect(hwnd, nullptr, FALSE); return 0;
+                g_presetDropdownOpen = !g_presetDropdownOpen; InvalidateRect(hwnd, nullptr, FALSE); return 0;
             }
             if (HitTest(GetRpcEnabledCheckRect(), mx, my)) {
-                g_rpcEnabled = !g_rpcEnabled;
-                RpcTick();
-                InvalidateRect(hwnd, nullptr, FALSE); return 0;
-            }
-            if (HitTest(GetRpcShowServerCheckRect(), mx, my)) {
-                g_rpcShowServer = !g_rpcShowServer;
-                RpcTick();
-                InvalidateRect(hwnd, nullptr, FALSE); return 0;
+                g_rpcEnabled = !g_rpcEnabled; RpcTick(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
             }
         }
         else {
-            if (HitTest(GetGitHubButtonRect(), mx, my)) {
-                ShellExecuteW(nullptr, L"open", GITHUB_URL, nullptr, nullptr, SW_SHOWNORMAL); return 0;
-            }
+            if (HitTest(GetGitHubButtonRect(), mx, my)) { ShellExecuteW(nullptr, L"open", GITHUB_URL, nullptr, nullptr, SW_SHOWNORMAL); return 0; }
             if (HitTest(GetCommitsButtonRect(), mx, my)) {
                 g_viewMode = ViewMode::Commits; g_commitsScroll = 0; g_commitsHovered = false;
                 if (!g_commitsLoaded && !g_commitsLoading) {
@@ -1352,10 +1121,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CLOSE:
-        if (!g_reallyQuit) {
-            ShowWindow(hwnd, SW_HIDE);
-            return 0;
-        }
+        if (!g_reallyQuit) { ShowWindow(hwnd, SW_HIDE); return 0; }
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
