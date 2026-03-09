@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// Путь к скомпилированной DLL (относительно папки Loader)
+IDR_SILKWARE_DLL IDR_DLL_TYPE "..\\Build\\SilkWareDLL.dll"

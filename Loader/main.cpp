@@ -1,4 +1,4 @@
-﻿#ifndef UNICODE
+#ifndef UNICODE
 #define UNICODE
 #endif
 #ifndef _UNICODE
@@ -20,6 +20,9 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <shlobj.h>
+
+#include "resource.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d2d1.lib")
@@ -107,7 +110,7 @@ static std::atomic<bool>  g_gameInjected{ false };
 static std::atomic<bool>  g_gameWasRunning{ false };
 
 static std::wstring g_statusText;
-static std::wstring g_loaderDir;
+static std::wstring g_extractedDLLPath;
 
 static ID2D1Factory* g_d2dFactory = nullptr;
 static ID2D1HwndRenderTarget* g_renderTarget = nullptr;
@@ -121,11 +124,61 @@ static IDWriteTextFormat* g_fmtCommitMsg = nullptr;
 static IDWriteTextFormat* g_fmtCommitMeta = nullptr;
 static IDWriteTextFormat* g_fmtCheckbox = nullptr;
 
-static std::wstring GetLoaderDirectory() {
-    wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr, p, MAX_PATH);
-    std::wstring s(p); size_t i = s.find_last_of(L"\\/");
-    return (i != std::wstring::npos) ? s.substr(0, i + 1) : L"";
+// ==================== DLL Extraction ====================
+
+static std::wstring GetTempDLLPath() {
+    wchar_t tempPath[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tempPath) == 0) {
+        return L"";
+    }
+    std::wstring folder = std::wstring(tempPath) + L"SilkWare\\";
+    CreateDirectoryW(folder.c_str(), nullptr);
+    return folder + L"SilkWareDLL.dll";
 }
+
+static bool ExtractDLLFromResources() {
+    HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_SILKWARE_DLL), MAKEINTRESOURCEW(IDR_DLL_TYPE));
+    if (!hRes) return false;
+
+    HGLOBAL hData = LoadResource(nullptr, hRes);
+    if (!hData) return false;
+
+    DWORD sz = SizeofResource(nullptr, hRes);
+    if (!sz) return false;
+
+    const void* data = LockResource(hData);
+    if (!data) return false;
+
+    g_extractedDLLPath = GetTempDLLPath();
+    if (g_extractedDLLPath.empty()) return false;
+
+    // Проверяем, существует ли уже файл с правильным размером
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(g_extractedDLLPath.c_str(), GetFileExInfoStandard, &fad)) {
+        if (fad.nFileSizeLow == sz && fad.nFileSizeHigh == 0) {
+            return true; // DLL уже извлечена
+        }
+    }
+
+    HANDLE hFile = CreateFileW(g_extractedDLLPath.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(hFile, data, sz, &written, nullptr);
+    CloseHandle(hFile);
+
+    return ok && written == sz;
+}
+
+static void CleanupExtractedDLL() {
+    if (!g_extractedDLLPath.empty()) {
+        // Пробуем удалить, но не критично если не получится
+        DeleteFileW(g_extractedDLLPath.c_str());
+    }
+}
+
+// ==================== Utility Functions ====================
 
 static std::wstring Utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";
@@ -134,6 +187,8 @@ static std::wstring Utf8ToWide(const std::string& s) {
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], len);
     return w;
 }
+
+// ==================== Discord RPC ====================
 
 #pragma pack(push, 1)
 struct DiscordHeader { int32_t opcode; int32_t length; };
@@ -214,6 +269,8 @@ static void RpcTick() {
     if (g_discordConnected) DiscordUpdatePresence();
 }
 
+// ==================== System Tray ====================
+
 static void TrayCreate(HWND hwnd) {
     if (g_trayCreated) return;
     ZeroMemory(&g_nid, sizeof(g_nid));
@@ -236,6 +293,8 @@ static void TrayShowMenu(HWND hwnd) {
     TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(m);
 }
+
+// ==================== Process Functions ====================
 
 static DWORD FindProcessId(const wchar_t* name) {
     DWORD pid = 0; HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -299,8 +358,6 @@ static bool InjectDLL(DWORD pid, const wchar_t* dll) {
     return ec != 0;
 }
 
-static std::wstring GetDLLPath() { return g_loaderDir + L"SilkWareDLL.dll"; }
-
 static void SetStatus(const std::wstring& t, AppState s) { g_statusText = t; g_state = s; InvalidateRect(g_hwnd, nullptr, FALSE); }
 
 static void ResetToMenu() {
@@ -319,8 +376,18 @@ static void CheckGameState() {
 }
 
 static DWORD WINAPI InjectionThread(LPVOID) {
-    std::wstring dll = GetDLLPath();
-    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) { SetStatus(L"Error: DLL not found!", AppState::Error); return 1; }
+    // Извлекаем DLL из ресурсов
+    if (!ExtractDLLFromResources()) {
+        SetStatus(L"Error: Failed to extract DLL!", AppState::Error);
+        return 1;
+    }
+
+    std::wstring dll = g_extractedDLLPath;
+    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        SetStatus(L"Error: DLL not found!", AppState::Error);
+        return 1;
+    }
+
     DWORD pid = FindProcessId(L"gmod.exe"); bool wasRunning = pid != 0;
     if (!pid) {
         SetStatus(L"Launching Garry's Mod...", AppState::Launching); RpcTick();
@@ -345,6 +412,8 @@ static DWORD WINAPI InjectionThread(LPVOID) {
     SetTimer(g_hwnd, TIMER_GAMEWATCH, GAMEWATCH_MS, nullptr);
     return 0;
 }
+
+// ==================== UI Helpers ====================
 
 static D2D1_RECT_F GetCloseButtonRect() {
     return D2D1::RectF((float)(WND_W - CLOSE_BTN_W), 0, (float)WND_W, (float)TITLEBAR_H);
@@ -379,6 +448,8 @@ static D2D1_RECT_F GetRpcCheckRect() {
 static bool HitTest(D2D1_RECT_F r, int mx, int my) {
     return mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom;
 }
+
+// ==================== Direct2D ====================
 
 static void DiscardD2DResources() {
     if (g_renderTarget) { g_renderTarget->Release(); g_renderTarget = nullptr; }
@@ -580,6 +651,8 @@ static void Render(HWND hwnd) {
     if (hr == D2DERR_RECREATE_TARGET) DiscardD2DResources();
 }
 
+// ==================== GitHub API ====================
+
 static std::string ExtractJsonString(const std::string& json, size_t start, const std::string& key) {
     std::string sk = "\"" + key + "\"";
     size_t pos = json.find(sk, start);
@@ -652,6 +725,8 @@ static DWORD WINAPI LoadCommitsThread(LPVOID) {
     InvalidateRect(g_hwnd, nullptr, FALSE);
     return 0;
 }
+
+// ==================== Window Procedure ====================
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -798,15 +873,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_SPINNER); KillTimer(hwnd, TIMER_RPC); KillTimer(hwnd, TIMER_GAMEWATCH);
         DiscordDisconnect(); TrayRemove(); DiscardD2DResources();
+        CleanupExtractedDLL();
         PostQuitMessage(0); return 0;
 
     default: return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
 
+// ==================== Entry Point ====================
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    g_loaderDir = GetLoaderDirectory();
 
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2dFactory);
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&g_dwFactory));
@@ -817,7 +894,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             g_dwFactory->CreateTextFormat(L"Segoe UI", nullptr, wt,
                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz, L"en-us", fmt);
             if (*fmt) { (*fmt)->SetTextAlignment(ta); (*fmt)->SetParagraphAlignment(pa); (*fmt)->SetWordWrapping(wrap); }
-    };
+        };
 
     MakeFmt(&g_fmtTitle, DWRITE_FONT_WEIGHT_BOLD, 17.0f,
         DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -864,4 +941,4 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (g_d2dFactory) g_d2dFactory->Release();
     CoUninitialize();
     return (int)msg.wParam;
-} // чеча соси хуй ты и такое с гпт не сможешь а еще и другим предъявляешь
+}

@@ -1,5 +1,3 @@
--- lua_openscript_cl SilkWare.lua
-
 SilkWare = SilkWare or {}
 
 local _hA = hook.Add
